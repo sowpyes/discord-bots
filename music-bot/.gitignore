@@ -1,0 +1,9 @@
+.env
+.venv/
+logs/
+__pycache__/
+*.pyc
+*.log
+application.yml
+Lavalink.jar
+jdk17/

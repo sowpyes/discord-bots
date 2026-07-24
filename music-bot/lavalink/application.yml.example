@@ -1,0 +1,20 @@
+server:
+  port: 2333
+  address: 127.0.0.1
+
+lavalink:
+  server:
+    password: "change-this-password"
+    sources:
+      youtube: false
+      http: true
+      soundcloud: false
+      bandcamp: false
+      twitch: false
+      vimeo: false
+      local: false
+
+logging:
+  level:
+    root: INFO
+    lavalink: INFO
