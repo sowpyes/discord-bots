@@ -3,6 +3,9 @@ server:
   address: 127.0.0.1
 
 lavalink:
+  plugins:
+    - dependency: "dev.lavalink.youtube:youtube-plugin:1.18.1"
+      snapshot: false
   server:
     password: "change-this-password"
     sources:
@@ -13,6 +16,13 @@ lavalink:
       twitch: false
       vimeo: false
       local: false
+
+plugins:
+  youtube:
+    enabled: true
+    allowSearch: true
+    allowDirectVideoIds: false
+    allowDirectPlaylistIds: false
 
 logging:
   level:

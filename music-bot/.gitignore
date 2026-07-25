@@ -7,3 +7,5 @@ __pycache__/
 application.yml
 Lavalink.jar
 jdk17/
+lavalink/plugins/
+lavalink/*.jar

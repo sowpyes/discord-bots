@@ -4,18 +4,23 @@
 
 與 `drawing-bot` 完全獨立：不同 Discord Application、不同 Token、獨立 `.venv`、獨立設定與日誌。
 
-## v0.2 範圍
+## v0.3 範圍
 
 - 加入／離開語音頻道
-- 透過 Lavalink 播放公開 HTTPS 直接音訊 URL(尚未支援 YouTube 搜尋)
-- 每個 Guild 使用獨立的播放佇列與播放狀態，Guild 之間互不影響
+- 播放來源：
+  - 公開 HTTPS 直接音訊 URL(例如直接的 MP3 檔案)
+  - YouTube 單曲網址(`youtube.com/watch?v=`、`youtu.be/`、`music.youtube.com/watch?v=`)
+  - 純文字關鍵字：自動轉換為 YouTube 搜尋，只取第一筆結果
+  - 尚未支援 YouTube 播放清單(playlist)：網址含 `list=` 或 `/playlist` 會直接被拒絕，不會呼叫 Provider
+- 每個 Guild 使用獨立的播放佇列與播放狀態，Guild 之間互不影響；YouTube 與直接音訊曲目共用同一個佇列、順序混合
 - 曲目自然播放完畢時自動播放佇列中的下一首；佇列清空後維持語音連線，不會自動離開
 - 佇列上限 50 首，超過會拒絕加入(不會無限制增長)
-- `/stop`、`/leave` 會清空佇列並停止播放，不會接著自動播放下一首
+- `/stop`、`/leave` 會清空佇列並停止播放(不分來源)，不會接著自動播放下一首
+- YouTube 播放可能因反機器人偵測、地區限制、年齡限制等 YouTube 端因素偶發失敗，屬於已知限制而非 Bot 錯誤
 
 指令：
 
-- `/play <url>`：目前沒有播放中曲目時立即播放，否則加入佇列
+- `/play url:<內容>`：可輸入直接音訊網址、YouTube 網址或搜尋關鍵字。目前沒有播放中曲目時立即播放，否則加入佇列
 - `/queue`：顯示目前播放曲目與接下來最多 10 首、總排隊數
 - `/nowplaying`：顯示目前曲目、播放進度、暫停狀態、佇列數量
 - `/skip`：跳過目前曲目，佇列有下一首則立即播放，否則停止
@@ -25,7 +30,9 @@
 
 `/skip`、`/stop`、`/leave` 需要與 Bot 在同一個語音頻道才能使用。
 
-YouTube 搜尋將在確認語音播放鏈穩定後，透過 Lavalink 的 `youtube-source` 插件加入，不使用已棄用的內建 YouTube Source。
+播放與佇列顯示只會顯示標題、作者、長度與來源(YouTube／HTTP)，不會顯示完整原始網址。
+
+YouTube 支援透過 Lavalink 官方外掛 [`dev.lavalink.youtube:youtube-plugin`](https://github.com/lavalink-devs/youtube-source)(目前使用版本 `1.18.1`)加入，取代已棄用的內建 YouTube Source；使用外掛預設 clients 設定，未啟用 OAuth/Cookie/Remote Cipher。
 
 ## 前置需求
 

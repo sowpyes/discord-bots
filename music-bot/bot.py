@@ -2,7 +2,7 @@ import asyncio
 import logging
 import os
 from logging.handlers import RotatingFileHandler
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 import discord
 import wavelink
@@ -36,6 +36,21 @@ logger.addHandler(_console_handler)
 intents = discord.Intents.default()
 
 QUEUE_MAX_SIZE = 50
+
+YOUTUBE_HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com", "youtu.be", "www.youtu.be"}
+ALLOWED_URL_SCHEMES = {"http", "https"}
+MAX_SEARCH_QUERY_LENGTH = 200
+MAX_SEARCH_TERM_DISPLAY_LENGTH = 80
+
+_SOURCE_LABELS = {"youtube": "YouTube", "http": "HTTP"}
+
+
+class PlayInputError(Exception):
+    """Raised for /play input that must be rejected before ever reaching Lavalink."""
+
+    def __init__(self, user_message: str):
+        self.user_message = user_message
+        super().__init__(user_message)
 
 
 class MusicBot(commands.Bot):
@@ -83,7 +98,8 @@ def format_duration(milliseconds: int) -> str:
 
 def format_track(track: wavelink.Playable) -> str:
     duration = "直播／未知" if track.is_stream else format_duration(track.length)
-    return f"{track.title} - {track.author} ({duration})"
+    source_label = _SOURCE_LABELS.get(track.source, track.source)
+    return f"{track.title} - {track.author} ({duration}) [{source_label}]"
 
 
 async def play_next(player: wavelink.Player, reason: str) -> wavelink.Playable | None:
@@ -188,6 +204,90 @@ def _redact_url(url: str) -> str:
         return "<unparseable-url>"
 
 
+def _clean_search_term(text: str, limit: int = MAX_SEARCH_TERM_DISPLAY_LENGTH) -> str:
+    collapsed = " ".join(text.split())
+    if len(collapsed) > limit:
+        return collapsed[: limit - 1] + "…"
+    return collapsed
+
+
+def _classify_play_input(raw: str) -> tuple[str, str]:
+    """Returns (kind, value) where kind is "youtube_url", "url", or "search".
+
+    Raises PlayInputError for input that must never reach Lavalink: empty
+    input, disallowed URL schemes, YouTube playlist URLs, oversized search text.
+    """
+    text = raw.strip()
+    if not text:
+        raise PlayInputError("請輸入音訊網址、YouTube 網址或搜尋關鍵字。")
+
+    parsed = urlparse(text)
+    if parsed.scheme and parsed.scheme not in ALLOWED_URL_SCHEMES:
+        raise PlayInputError(f"不支援的網址格式(scheme={parsed.scheme})，請提供 http/https 網址或搜尋關鍵字。")
+
+    host = (parsed.hostname or "").lower()
+
+    if parsed.scheme in ALLOWED_URL_SCHEMES and host in YOUTUBE_HOSTS:
+        if parsed.path == "/playlist" or "list" in parse_qs(parsed.query):
+            raise PlayInputError("目前版本尚未支援 YouTube 播放清單。")
+        return "youtube_url", text
+
+    if parsed.scheme in ALLOWED_URL_SCHEMES and host:
+        return "url", text
+
+    if len(text) > MAX_SEARCH_QUERY_LENGTH:
+        raise PlayInputError(
+            f"搜尋關鍵字長度 {len(text)} 超過上限 {MAX_SEARCH_QUERY_LENGTH} 字元，請縮短後再試。"
+        )
+    return "search", text
+
+
+def _describe_play_source(kind: str, value: str) -> str:
+    """A log-safe description: hostname + a short id prefix for URLs, cleaned/
+    truncated text for search -- never a full URL query, token, or password."""
+    if kind == "search":
+        return f"search:{_clean_search_term(value, limit=80)}"
+
+    parsed = urlparse(value)
+    if kind == "youtube_url":
+        video_id = parse_qs(parsed.query).get("v", [None])[0]
+        if not video_id and parsed.hostname in {"youtu.be", "www.youtu.be"}:
+            video_id = parsed.path.lstrip("/").split("/")[0]
+        return f"youtube host={parsed.hostname} id_prefix={(video_id or '')[:6]}"
+
+    return _redact_url(value)
+
+
+def _classify_load_error(kind: str, exc: "wavelink.LavalinkLoadException") -> str:
+    """Maps a Lavalink load error to one of the required user-facing categories.
+
+    Keyword matching against Lavalink/youtube-source's error+cause text is
+    best-effort -- exact wording isn't guaranteed across plugin versions, so
+    this always has a distinct, non-generic fallback per input kind rather
+    than collapsing everything into a single "cannot parse" message.
+    """
+    text = f"{exc.error} {exc.cause}".lower()
+
+    if any(k in text for k in ("sign in", "not a bot", "not a robot", "confirm you")):
+        return "YouTube 要求登入驗證或偵測為機器人操作，暫時無法播放，請稍後再試。"
+    if "private" in text:
+        return "這部影片為私人影片，無法播放。"
+    if any(k in text for k in ("unavailable", "removed", "deleted", "no longer available")):
+        return "這部影片不可用或已被移除。"
+    if any(k in text for k in ("age restrict", "age-restrict", "confirm your age", "age verification")):
+        return "這部影片有年齡限制，Bot 無法播放。"
+    if ("region" in text or "country" in text) and "not available" in text:
+        return "這部影片在目前地區無法播放。"
+    if "source" in text and ("not available" in text or "unknown" in text or "no such" in text):
+        return "YouTube 播放功能目前未就緒，請稍後再試或聯絡管理員。"
+
+    if kind == "youtube_url":
+        return "無法解析這個 YouTube 網址，請確認影片是否存在。"
+    if kind == "search":
+        return "找不到符合的搜尋結果，請換個關鍵字再試。"
+    return "播放失敗，請稍後再試。"
+
+
 def _lavalink_available() -> bool:
     return any(
         node.status is wavelink.NodeStatus.CONNECTED for node in wavelink.Pool.nodes.values()
@@ -279,8 +379,8 @@ async def join(interaction: discord.Interaction):
     await interaction.followup.send(f"已加入語音頻道：{vc.channel.name}")
 
 
-@bot.tree.command(name="play", description="播放指定的音訊 URL，若正在播放則加入佇列")
-@app_commands.describe(url="公開可存取的音訊檔案網址")
+@bot.tree.command(name="play", description="播放直接音訊網址、YouTube 網址或搜尋關鍵字")
+@app_commands.describe(url="公開音訊網址、YouTube 網址，或想搜尋的關鍵字")
 async def play(interaction: discord.Interaction, url: str):
     await interaction.response.defer()
 
@@ -290,32 +390,60 @@ async def play(interaction: discord.Interaction, url: str):
         return
 
     try:
-        tracks = await wavelink.Playable.search(url)
+        kind, value = _classify_play_input(url)
+    except PlayInputError as exc:
+        await interaction.followup.send(exc.user_message)
+        return
+
+    source_desc = _describe_play_source(kind, value)
+
+    try:
+        if kind == "search":
+            result = await wavelink.Playable.search(value, source=wavelink.TrackSource.YouTube)
+        else:
+            result = await wavelink.Playable.search(value)
+    except wavelink.LavalinkLoadException as exc:
+        logger.error(
+            "Failed to load track (kind=%s, source=%s): error=%s severity=%s cause=%s",
+            kind, source_desc, exc.error, exc.severity, exc.cause,
+        )
+        await interaction.followup.send(_classify_load_error(kind, exc))
+        return
     except Exception:
-        logger.exception("Failed to resolve track from URL: %s", _redact_url(url))
-        await interaction.followup.send("無法解析這個音訊網址，請確認是否為有效連結。")
+        logger.exception("Unexpected error loading track (kind=%s, source=%s)", kind, source_desc)
+        await interaction.followup.send("發生未預期的錯誤，請稍後再試。")
         return
 
-    if not tracks:
-        logger.error("No playable track found for URL: %s", _redact_url(url))
-        await interaction.followup.send("找不到可播放的音訊內容，請確認網址是否為有效的音訊檔案。")
+    if isinstance(result, wavelink.Playlist):
+        await interaction.followup.send("目前版本尚未支援 YouTube 播放清單。")
         return
 
-    track = tracks[0]
+    if not result:
+        logger.error("No playable track found (kind=%s, source=%s)", kind, source_desc)
+        if kind == "search":
+            await interaction.followup.send("找不到符合的搜尋結果，請換個關鍵字再試。")
+        elif kind == "youtube_url":
+            await interaction.followup.send("無法解析這個 YouTube 網址，請確認影片是否存在。")
+        else:
+            await interaction.followup.send("找不到可播放的音訊內容，請確認網址是否為有效的音訊檔案。")
+        return
+
+    track = result[0]
+    search_term_line = f"\n搜尋詞：{_clean_search_term(value)}" if kind == "search" else ""
 
     async with _get_lock(interaction.guild.id):
         if vc.current is None:
             try:
                 await vc.play(track)
             except Exception:
-                logger.exception("Failed to play track: %s", _redact_url(url))
+                logger.exception("Failed to play track (kind=%s, source=%s)", kind, source_desc)
                 await interaction.followup.send("播放失敗，請稍後再試。")
                 return
             logger.info(
-                "Playing track: %s (requested by %s, guild=%s)",
-                track.title, interaction.user, interaction.guild.id,
+                "Playing track: %s [%s] (requested by %s, guild=%s)",
+                track.title, track.source, interaction.user, interaction.guild.id,
             )
-            await interaction.followup.send(f"正在播放：{format_track(track)}")
+            await interaction.followup.send(f"正在播放：{format_track(track)}{search_term_line}")
             return
 
         if vc.queue.count >= QUEUE_MAX_SIZE:
@@ -325,10 +453,10 @@ async def play(interaction: discord.Interaction, url: str):
         vc.queue.put(track)
         position = vc.queue.count
         logger.info(
-            "Queued track at position %d: %s (requested by %s, guild=%s)",
-            position, track.title, interaction.user, interaction.guild.id,
+            "Queued track at position %d: %s [%s] (requested by %s, guild=%s)",
+            position, track.title, track.source, interaction.user, interaction.guild.id,
         )
-        await interaction.followup.send(f"已加入佇列第 {position} 位：{format_track(track)}")
+        await interaction.followup.send(f"已加入佇列第 {position} 位：{format_track(track)}{search_term_line}")
 
 
 @bot.tree.command(name="queue", description="顯示目前播放佇列")
